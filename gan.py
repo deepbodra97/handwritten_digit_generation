@@ -52,12 +52,56 @@ def print_accuracy(epoch, generator, discriminator, dataset, latent_dimensionens
 	filename = path_save_root+'models/'+'model_%03d.h5' % (epoch + 1)
 	generator.save(filename)
 
+class SelfAttention(Layer):
+    def __init__(self, channels, **kwargs):
+        super(SelfAttention, self).__init__(**kwargs)
+        self.channels = channels
+        self.kernels_f_g = self.channels // 8
+        self.kernels_h = self.channels
+
+    def build(self, input_shape):
+        kernel_shape_f_g = (1, 1) + (self.channels, self.kernels_f_g)
+        kernel_shape_h = (1, 1) + (self.channels, self.kernels_h)
+
+        self.gamma = self.add_weight(name='gamma', shape=[1], initializer='zeros', trainable=True)
+        self.kernel_f = self.add_weight(shape=kernel_shape_f_g, initializer='glorot_uniform')
+        self.kernel_g = self.add_weight(shape=kernel_shape_f_g, initializer='glorot_uniform')
+        self.kernel_h = self.add_weight(shape=kernel_shape_h, initializer='glorot_uniform')
+        self.bias_f = self.add_weight(shape=(self.kernels_f_g,), initializer='zeros')
+        self.bias_g = self.add_weight(shape=(self.kernels_f_g,), initializer='zeros')
+        self.bias_h = self.add_weight(shape=(self.kernels_h,), initializer='zeros')
+        super(SelfAttention, self).build(input_shape)
+
+        self.input_spec = InputSpec(ndim=4, axes={3: input_shape[-1]})
+        self.built = True
+
+    def call(self, x):
+        def make_flat(x):
+            return K.reshape(x, shape=[K.shape(x)[0], K.shape(x)[1]*K.shape(x)[2], K.shape(x)[-1]])
+
+        f = K.conv2d(x, kernel=self.kernel_f, strides=(1, 1), padding='same')
+        f = K.bias_add(f, self.bias_f)
+        g = K.conv2d(x, kernel=self.kernel_g, strides=(1, 1), padding='same')
+        g = K.bias_add(g, self.bias_g)
+        h = K.conv2d(x, kernel=self.kernel_h, strides=(1, 1), padding='same')
+        h = K.bias_add(h, self.bias_h)
+        s = tf.matmul(make_flat(g), make_flat(f), transpose_b=True)
+        beta = K.softmax(s, axis=-1)
+        o = K.batch_dot(beta, make_flat(h))
+        o = K.reshape(o, shape=K.shape(x))
+        x = self.gamma * o + x
+        return x
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 def get_generator(latent_dimensionension):
 	model = Sequential()
 	n_nodes = 128 * 7 * 7
 	model.add(Dense(n_nodes, input_dim=latent_dimensionension))
 	model.add(BatchNormalization(momentum=0.8))
 	model.add(LeakyReLU(alpha=0.2))
+	model = SelfAttention(n_nodes)(model)
 	model.add(Reshape((7, 7, 128)))
 	model.add(Conv2DTranspose(128, (4,4), strides=(2,2), padding='same'))
 	model.add(BatchNormalization(momentum=0.8))
